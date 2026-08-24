@@ -18,26 +18,32 @@ wrote results/concurrency.md
 
 ## The measurement
 
-128 tasks, 20 ms simulated service time each, varying the concurrency limit:
+128 tasks, 20 ms simulated service time each, sweeping the concurrency limit:
 
-| limit | p50 total | p95 total | p95 queued | p95 service | bound by |
-|---|---|---|---|---|---|
-| 1 | 1985 ms | 3787 ms | 3756 ms | 32 ms | admission |
-| 4 | 495 ms | 961 ms | 930 ms | 33 ms | admission |
-| 16 | 122 ms | 247 ms | 216 ms | 32 ms | admission |
-| 64 | 31 ms | 62 ms | 31 ms | 31 ms | admission |
-| 128 | 29 ms | 29 ms | 0 ms | 29 ms | service |
+| limit | queued vs service | bound by |
+|---|---|---|
+| 1 | >50x | admission |
+| 4 | 10-50x | admission |
+| 16 | 2-10x | admission |
+| 64 | ~1x | **crossover** (flips between runs) |
+| 128 | <1x | service |
 
-**Service time never changed.** It sat at ~31 ms across every limit, because
-it is a property of the work rather than of the client. Everything else was
-admission delay.
+**Service time never changed.** It stays within 25% of its maximum across a
+128x range of limits, because it is a property of the work rather than of the
+client. Everything else was admission delay.
 
 That is the whole point: a single reported latency number cannot tell you
 which of the two you are looking at, and **the two are fixed by opposite
 actions** — admission-bound means raise the limit or shed load, service-bound
 means a faster backend. Acting on the wrong one wastes the effort.
 
-Full table and limitations: [`results/concurrency.md`](results/concurrency.md).
+Note what the table does *not* claim. At `limit=64` queue and service time are
+within 2x of each other and the classification flips between runs, so it is
+labelled a crossover rather than given a verdict it cannot support.
+
+Absolute millisecond timings are deliberately **not** committed — see
+[`results/concurrency.md`](results/concurrency.md) for why, and for the full
+set of asserted claims.
 
 ## Why this exists
 
