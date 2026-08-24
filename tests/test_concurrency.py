@@ -71,11 +71,11 @@ async def test_queue_time_dominates_when_limit_is_the_bottleneck():
     _, tight = await bounded_map(work, range(32), limit=2)
     _, loose = await bounded_map(work, range(32), limit=32)
 
-    t, l = tight.summary(), loose.summary()
+    t, lo = tight.summary(), loose.summary()
     assert t["p95_queued_s"] > t["p95_service_s"], "expected admission-bound"
-    assert l["p95_queued_s"] < t["p95_queued_s"], "raising the limit must cut queueing"
+    assert lo["p95_queued_s"] < t["p95_queued_s"], "raising the limit must cut queueing"
     # Service time is a property of the work, not of the limit.
-    assert t["p95_service_s"] == pytest.approx(l["p95_service_s"], abs=0.02)
+    assert t["p95_service_s"] == pytest.approx(lo["p95_service_s"], abs=0.02)
 
 
 @pytest.mark.asyncio
