@@ -54,7 +54,6 @@ async def measure(limit: int) -> dict[str, float | int]:
 
 def write_invariants(rows: list[tuple[int, dict]]) -> None:
     """Only claims that hold on any machine."""
-    by_limit = dict(rows)
     services = [s["p95_service_s"] for _, s in rows]
     spread = (max(services) - min(services)) / max(services)
 
