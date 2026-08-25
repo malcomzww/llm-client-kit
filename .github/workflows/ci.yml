@@ -24,7 +24,7 @@ jobs:
         run: uv sync --extra dev
 
       - name: Lint
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts
 
       - name: Test
         run: uv run pytest -q
@@ -34,8 +34,14 @@ jobs:
       # silently drifting from the code that produced it.
       - name: Verify generated results are current
         run: |
-          if [ -f scripts/generate_results.py ]; then
-            uv run python scripts/generate_results.py
-            git diff --exit-code results/ \
-              || (echo "results/ is stale -- regenerate and commit" && exit 1)
-          fi
+          for s in scripts/generate_results.py scripts/generate_test_report.py; do
+            [ -f "$s" ] && uv run python "$s"
+          done
+          git diff --exit-code results/ \
+            || (echo "results/ is stale -- regenerate and commit" && exit 1)
+
+      # generate_test_report.py exits non-zero if any test file can reach a
+      # real socket. The suite must stay replayable: a live call in CI is a
+      # billed, flaky build that depends on a third party's uptime.
+      - name: No test may make a live API call
+        run: uv run python scripts/generate_test_report.py

@@ -10,11 +10,17 @@ Everything here serves answering that. It is a small library on purpose.
 
 ```
 $ python -m pytest -q
-31 passed in 0.82s
+104 passed
 
 $ python scripts/generate_results.py
-wrote results/concurrency.md
+wrote concurrency.md (committed) and concurrency-raw.md (gitignored)
 ```
+
+**No test makes a live API call.** Every test drives the real client — real
+retry loop, real deadlines, real connection pooling — over an injected
+`httpx.MockTransport` or a recorded cassette, so only the socket is replaced.
+A committed script asserts it: see
+[`results/test-suite.md`](results/test-suite.md).
 
 ## The measurement
 
@@ -72,11 +78,30 @@ uv run python scripts/generate_results.py
 ```
 
 ```python
-from llm_client_kit.concurrency import bounded_map
+from llm_client_kit.config import ClientConfig
+from llm_client_kit.cost import CostLedger, ModelPrice
+from llm_client_kit.transport import ChatMessage, LLMClient
 
-results, stats = await bounded_map(call_model, prompts, limit=8)
-print(stats.summary())
-# {'n': 128, 'p95_total_s': 0.49, 'p95_queued_s': 0.46, 'p95_service_s': 0.031, ...}
+# A budget that raises, so an unattended loop stops itself.
+ledger = CostLedger({"gpt-4o-mini": ModelPrice(0.15, 0.60)}, budget_usd=1.00)
+
+async with LLMClient(ClientConfig.from_env(), ledger=ledger) as client:
+    reply = await client.chat([ChatMessage.user("hello")])
+    print(reply.text, reply.usage.cache_hit_rate)
+
+    # Many calls under one admission limit, results in input order.
+    results, stats = await client.chat_many(batches, limit=8)
+    print(stats.summary())
+```
+
+Record once, replay free forever:
+
+```python
+from llm_client_kit.cassette import Cassette
+
+with Cassette("tests/cassettes/chat.json", mode="auto") as tape:
+    async with LLMClient(cfg, transport=tape.transport()) as client:
+        await client.chat([ChatMessage.user("hello")])
 ```
 
 ## Design decisions
@@ -104,6 +129,33 @@ cares about.
 **Nearest-rank percentiles, named in the docstring.** Definitions differ by up
 to one rank. An unreproducible p95 is worse than no p95.
 
+**A budget that raises, not one that logs.** The failure mode of a runaway
+agent loop is not a crash — it is a correct-looking run and an invoice. A
+warning in a log nobody reads during an unattended run is indistinguishable
+from no budget at all, so `check_budget()` raises. Recording and enforcing are
+separate: the call that broke the budget is still recorded, because the tokens
+were spent either way and that is the entry you most want to see.
+
+**`Authorization` is scrubbed when a cassette is recorded, never when it is
+loaded.** A cassette that ever contained a key is a leaked key — the file is
+committed, pushed and mirrored long before anyone reviews it, and scrubbing on
+load is too late because the bytes already reached disk. A test asserts on the
+raw file contents, so a key smuggled through an unlisted header or a URL
+parameter fails it too.
+
+**A cassette miss is fatal, never a fallback to the network.** Falling back is
+how a suite quietly starts billing you, and it makes a green CI run meaningless
+because you cannot tell whether it replayed or dialled out.
+
+**Cassettes match on method, URL and a canonical body hash — not headers.**
+Header matching is how cassette suites rot: a client version bump changes
+`user-agent` and every cassette misses. JSON keys are sorted before hashing,
+because dict ordering is not part of a request's meaning.
+
+**Money is `Decimal`, not `float`.** `0.1 + 0.2 != 0.3` in binary floating
+point, and a ledger that drifts a fraction of a cent per call is one nobody
+trusts after a million calls.
+
 **Two environment variables only** — `OPENAI_BASE_URL` and `OPENAI_API_KEY`,
 never per-provider names. Swapping to a local vLLM server, Ollama, OpenRouter
 or Groq is then a `base_url` change with no code change.
@@ -117,8 +169,15 @@ or Groq is then a `base_url` change with no code change.
   contention, no TLS, no DNS, no head-of-line blocking from HTTP/2
   multiplexing.
 - Single machine, single event loop. Nothing here is tested across processes.
-- The HTTP transport and cassette record/replay layer are **not yet
-  implemented**; `config.py`, `retry.py` and `concurrency.py` are.
+- **The client has never been run against a live provider.** No API key was
+  configured while it was built, so every claim about it rests on mock
+  transports and cassettes. Those prove the client parses what a server *did*
+  send; they cannot prove a provider still sends it, or that a real endpoint
+  will not fail in a way nothing here anticipates.
+- **The cost ledger is arithmetic, not a bill.** It costs the tokens a provider
+  reported. Reported token counts are the provider's own accounting, and
+  nothing here reconciles them against an invoice.
+- Streaming and a circuit breaker are not implemented — see the status table.
 
 ## Status
 
@@ -127,9 +186,15 @@ or Groq is then a `base_url` change with no code change.
 | `config.py` — endpoint resolution, key redaction | done |
 | `retry.py` — policy, full jitter, deadline propagation | done |
 | `concurrency.py` — bounded map, queue/service split | done |
-| `transport.py` — httpx client, streaming | not started |
-| `cassettes.py` — record/replay for free deterministic CI | not started |
-| `cost.py` — token and cost ledger | not started |
+| `transport.py` — httpx client, `chat`/`chat_many`, pooling | done |
+| `cassette.py` — record/replay for free deterministic CI | done |
+| `cost.py` — token and cost ledger, hard budget | done |
+| streaming (`stream=true`, SSE) | not started |
+| circuit breaker | not started |
+
+Streaming and a circuit breaker are listed in the concept inventory and are
+**not** implemented. They are named here rather than omitted, because a status
+table that only lists what exists is a marketing page.
 
 ## Concepts covered
 
