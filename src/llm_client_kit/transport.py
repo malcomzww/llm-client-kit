@@ -176,6 +176,31 @@ class Completion:
         )
 
 
+def as_retryable_os_error(exc: Exception) -> Exception:
+    """Translate an httpx transport failure into the stdlib type the policy knows.
+
+    `RetryPolicy` classifies transport failures as `TimeoutError`,
+    `ConnectionError` or `OSError`, and deliberately imports no HTTP library --
+    that independence is what lets it be tested and reused without httpx.
+
+    But no httpx exception subclasses any of those: `httpx.ConnectError` derives
+    from `httpx.TransportError`, not `OSError`. Without this translation every
+    real connection reset, DNS failure and read timeout is classified
+    non-retryable and surfaces on the first blip -- the exact failures retries
+    exist for. Caught by a test that raises `httpx.ConnectError`.
+
+    Translating here rather than teaching `retry.py` about httpx keeps the
+    library dependency at the one boundary that already has it.
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        return TimeoutError(str(exc) or exc.__class__.__name__)
+    if isinstance(exc, httpx.TransportError):
+        # NetworkError, ProtocolError, PoolTimeout and friends: all transient
+        # at the socket level and worth another attempt.
+        return ConnectionError(str(exc) or exc.__class__.__name__)
+    return exc
+
+
 def _retry_after_seconds(response: httpx.Response) -> float | None:
     """Parse Retry-After, seconds form only.
 
@@ -298,6 +323,9 @@ class LLMClient:
         loop = asyncio.get_running_loop()
         started = loop.time()
         last_error: Exception | None = None
+        # What the policy classifies, which may be a stdlib translation of an
+        # httpx error. The original is what the caller finally sees.
+        classify_as: Exception | None = None
         attempt = 0
 
         while True:
@@ -311,6 +339,7 @@ class LLMClient:
                 )
             except Exception as exc:  # noqa: BLE001 - classified by the policy
                 last_error, status, retry_after = exc, None, None
+                classify_as = as_retryable_os_error(exc)
             else:
                 if response.status_code < 400:
                     return self._finish(response, attempt + 1, loop.time() - started)
@@ -319,9 +348,10 @@ class LLMClient:
                 last_error = APIStatusError(
                     status, response.text, str(response.request.url)
                 )
+                classify_as = last_error
 
             assert last_error is not None
-            if not self.retry.should_retry(attempt, status, last_error):
+            if not self.retry.should_retry(attempt, status, classify_as):
                 raise last_error
             delay = budget.clamp(
                 self.retry.delay_for(attempt, retry_after, rng=self._rng)
